@@ -48,6 +48,22 @@ const Field: React.FC<FieldProps> = ({ robot, width, height, samples, launchedSa
     setHistory(prev => [robot.pos, ...prev].slice(0, 50));
   }, [robot.pos.x, robot.pos.y]);
 
+  // Helper function to transform coordinates based on alliance
+  const transformCoord = (x: number, y: number) => {
+    if (alliance === 'red') {
+      // Flip field for red alliance (180 degree rotation)
+      return { x: width - x, y: height - y };
+    }
+    return { x, y };
+  };
+
+  const transformRobotHeading = (heading: number) => {
+    if (alliance === 'red') {
+      return heading + Math.PI;
+    }
+    return heading;
+  };
+
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -55,6 +71,12 @@ const Field: React.FC<FieldProps> = ({ robot, width, height, samples, launchedSa
     if (!ctx) return;
 
     ctx.clearRect(0, 0, width, height);
+
+    // Apply field transformation for red alliance
+    if (alliance === 'red') {
+      ctx.translate(width, height);
+      ctx.rotate(Math.PI);
+    }
 
     if (images.field) {
       ctx.drawImage(images.field, 0, 0, width, height);
@@ -66,10 +88,13 @@ const Field: React.FC<FieldProps> = ({ robot, width, height, samples, launchedSa
     // Draw Static "Solid" Corner Baskets
     const basketSizePx = toPx(24.5);
     
-    // Blue Basket (Top Left)
+    // Blue Basket (Top Left for blue alliance, top right for red alliance)
     ctx.save();
+    const blueBasketPos = alliance === 'blue' 
+      ? { x: 0, y: 0 } 
+      : { x: width - basketSizePx, y: height - basketSizePx };
     ctx.beginPath();
-    ctx.rect(0, 0, basketSizePx, basketSizePx);
+    ctx.rect(blueBasketPos.x, blueBasketPos.y, basketSizePx, basketSizePx);
     ctx.fillStyle = (isShootingMode && alliance === 'blue') ? 'rgba(37, 99, 235, 0.4)' : 'rgba(37, 99, 235, 0.1)';
     ctx.fill();
     ctx.lineWidth = (isShootingMode && alliance === 'blue') ? 6 : 4;
@@ -81,17 +106,19 @@ const Field: React.FC<FieldProps> = ({ robot, width, height, samples, launchedSa
     ctx.lineWidth = 1;
     ctx.strokeStyle = 'rgba(37, 99, 235, 0.3)';
     for(let i=0; i<basketSizePx; i+=toPx(4)) {
-        ctx.moveTo(i, 0); ctx.lineTo(i, basketSizePx);
-        ctx.moveTo(0, i); ctx.lineTo(basketSizePx, i);
+        ctx.moveTo(blueBasketPos.x + i, blueBasketPos.y); ctx.lineTo(blueBasketPos.x + i, blueBasketPos.y + basketSizePx);
+        ctx.moveTo(blueBasketPos.x, blueBasketPos.y + i); ctx.lineTo(blueBasketPos.x + basketSizePx, blueBasketPos.y + i);
     }
     ctx.stroke();
     ctx.restore();
 
-    // Red Basket (Top Right)
+    // Red Basket (Top Right for blue alliance, top left for red alliance)
     ctx.save();
+    const redBasketPos = alliance === 'blue' 
+      ? { x: width - basketSizePx, y: 0 } 
+      : { x: 0, y: height - basketSizePx };
     ctx.beginPath();
-    ctx.rect(width - basketSizePx, 0, basketSizePx, basketSizePx);
-    // Modified logic for Red basket drawing to be properly aligned
+    ctx.rect(redBasketPos.x, redBasketPos.y, basketSizePx, basketSizePx);
     ctx.fillStyle = (isShootingMode && alliance === 'red') ? 'rgba(220, 38, 38, 0.4)' : 'rgba(220, 38, 38, 0.1)';
     ctx.fill();
     ctx.lineWidth = (isShootingMode && alliance === 'red') ? 6 : 4;
@@ -103,16 +130,17 @@ const Field: React.FC<FieldProps> = ({ robot, width, height, samples, launchedSa
     ctx.lineWidth = 1;
     ctx.strokeStyle = 'rgba(220, 38, 38, 0.3)';
     for(let i=0; i<basketSizePx; i+=toPx(4)) {
-        ctx.moveTo(width - i, 0); ctx.lineTo(width - i, basketSizePx);
-        ctx.moveTo(width, i); ctx.lineTo(width - basketSizePx, i);
+        ctx.moveTo(redBasketPos.x + i, redBasketPos.y); ctx.lineTo(redBasketPos.x + i, redBasketPos.y + basketSizePx);
+        ctx.moveTo(redBasketPos.x, redBasketPos.y + i); ctx.lineTo(redBasketPos.x + basketSizePx, redBasketPos.y + i);
     }
     ctx.stroke();
     ctx.restore();
 
     samples.forEach(sample => {
       if (sample.isPickedUp) return;
-      const px = toPx(sample.pos.x);
-      const py = toPx(sample.pos.y);
+      const pos = transformCoord(toPx(sample.pos.x), toPx(sample.pos.y));
+      const px = pos.x;
+      const py = pos.y;
       const radius = toPx(2);
       ctx.save();
       ctx.shadowBlur = 10;
@@ -126,8 +154,9 @@ const Field: React.FC<FieldProps> = ({ robot, width, height, samples, launchedSa
     });
 
     launchedSamples.forEach(ls => {
-      const startX = toPx(ls.pos.x);
-      const startY = toPx(ls.pos.y);
+      const startPos = transformCoord(toPx(ls.pos.x), toPx(ls.pos.y));
+      const startX = startPos.x;
+      const startY = startPos.y;
       const t = ls.progress;
       const time = ls.timeElapsed || 0;
       
@@ -140,14 +169,15 @@ const Field: React.FC<FieldProps> = ({ robot, width, height, samples, launchedSa
         const scaledGravity = gravity * scale; // convert to pixels
         
         // Calculate position using physics equations
-        const vx = ls.velocity.x;
-        const vy = ls.velocity.y;
+        const vx = alliance === 'red' ? -ls.velocity.x : ls.velocity.x;
+        const vy = alliance === 'red' ? -ls.velocity.y : ls.velocity.y;
         const vz = Math.sin(ls.launchAngle) * Math.sqrt(vx*vx + vy*vy); // vertical velocity component
         
         if (ls.isScored) {
           // Perfect arc trajectory to target
-          const endX = toPx(ls.target.x);
-          const endY = toPx(ls.target.y);
+          const targetPos = transformCoord(toPx(ls.target.x), toPx(ls.target.y));
+          const endX = targetPos.x;
+          const endY = targetPos.y;
           const dx = endX - startX;
           const dy = endY - startY;
           
@@ -169,8 +199,10 @@ const Field: React.FC<FieldProps> = ({ robot, width, height, samples, launchedSa
           vy_current = vy * scale;
         } else {
           // Miss trajectory - aggressive overshoot then drop
-          const basketX = toPx(ls.target.x > 72 ? 144 : 0);
-          const basketY = toPx(0);
+          const targetX = alliance === 'red' ? (ls.target.x > 72 ? 0 : width) : (ls.target.x > 72 ? width : 0);
+          const targetY = 0;
+          const basketX = targetX;
+          const basketY = targetY;
           
           if (t < 0.65) {
             // Flying toward basket with arc
@@ -192,8 +224,9 @@ const Field: React.FC<FieldProps> = ({ robot, width, height, samples, launchedSa
             // Bounce/ricochet off basket
             const bounceStart = 0.65;
             const bounceProgress = (t - bounceStart) / (1 - bounceStart);
-            const endX = toPx(ls.target.x);
-            const endY = toPx(ls.target.y);
+            const targetPos = transformCoord(toPx(ls.target.x), toPx(ls.target.y));
+            const endX = targetPos.x;
+            const endY = targetPos.y;
             
             // Bounce trajectory
             const bounceHeight = toPx(15) * (1 - bounceProgress);
@@ -207,8 +240,9 @@ const Field: React.FC<FieldProps> = ({ robot, width, height, samples, launchedSa
         }
       } else {
         // Fallback for old samples without velocity data
-        const endX = toPx(ls.target.x);
-        const endY = toPx(ls.target.y);
+        const targetPos = transformCoord(toPx(ls.target.x), toPx(ls.target.y));
+        const endX = targetPos.x;
+        const endY = targetPos.y;
         x = startX + (endX - startX) * t;
         y = startY + (endY - startY) * t;
         z = toPx(25) * Math.sin(Math.PI * t);
@@ -335,17 +369,20 @@ const Field: React.FC<FieldProps> = ({ robot, width, height, samples, launchedSa
       ctx.beginPath();
       ctx.strokeStyle = 'rgba(168, 85, 247, 0.3)';
       ctx.lineWidth = 2;
-      ctx.moveTo(toPx(history[0].x), toPx(history[0].y));
+      const startPos = transformCoord(toPx(history[0].x), toPx(history[0].y));
+      ctx.moveTo(startPos.x, startPos.y);
       for (let i = 1; i < history.length; i++) {
-        ctx.lineTo(toPx(history[i].x), toPx(history[i].y));
+        const pos = transformCoord(toPx(history[i].x), toPx(history[i].y));
+        ctx.lineTo(pos.x, pos.y);
       }
       ctx.stroke();
     }
 
     const drawRobot = (state: RobotState, isPartner: boolean) => {
       ctx.save();
-      ctx.translate(toPx(state.pos.x), toPx(state.pos.y));
-      ctx.rotate(state.heading);
+      const pos = transformCoord(toPx(state.pos.x), toPx(state.pos.y));
+      ctx.translate(pos.x, pos.y);
+      ctx.rotate(transformRobotHeading(state.heading));
       const rw = toPx(state.size.x);
       const rh = toPx(state.size.y);
 
@@ -434,7 +471,10 @@ const Field: React.FC<FieldProps> = ({ robot, width, height, samples, launchedSa
     if (alliancePartner) drawRobot(alliancePartner, true);
     drawRobot(robot, false);
 
-  }, [robot, width, height, images, history, alliancePartner, samples, launchedSamples]);
+    // Restore context from alliance transformation
+    ctx.restore();
+
+  }, [robot, width, height, images, history, alliancePartner, samples, launchedSamples, alliance]);
 
   return (
     <div className="rounded-2xl overflow-hidden shadow-[0_0_50px_rgba(0,0,0,0.5)] border border-white/10 bg-neutral-900">
