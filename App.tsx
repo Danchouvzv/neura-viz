@@ -301,6 +301,11 @@ const App: React.FC = () => {
           if (buttons[4]) setIsShootingMode(true);
           if (buttons[0] || buttons[3]) setIsShootingMode(false);
 
+          // L2 button (6) for relocalize
+          if (buttons[6]) {
+            relocalize();
+          }
+
           if (buttons[7]) { 
             if (isShootingModeRef.current) {
               if (nextRobot.heldSamples.length > 0 && !shootCooldownRef.current) {
@@ -785,7 +790,7 @@ const App: React.FC = () => {
                     <span className="text-yellow-400 text-lg">⚠️</span>
                     <span className="text-yellow-200 font-bold text-sm uppercase">Odometry Drift Detected</span>
                   </div>
-                  <p className="text-yellow-300/70 text-xs text-center mt-1">Drive to HP corner and relocalize</p>
+                  <p className="text-yellow-300/70 text-xs text-center mt-1">Drive to HP corner and relocalize (L2)</p>
                 </div>
               )}
               
@@ -842,6 +847,7 @@ const App: React.FC = () => {
                  <span>L1: ARM SHOOT</span>
                  <span>△/X: DISARM</span>
                  <span>R2: ACTION</span>
+                 <span>L2: RELOCALIZE</span>
               </div>
             </div>
           )}
