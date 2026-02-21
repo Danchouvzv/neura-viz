@@ -4,6 +4,7 @@ import Field from './components/Field';
 import { useGamepad } from './hooks/useGamepad';
 import { RobotState, Vector2, Sample, SampleType, LaunchedSample, Alliance } from './types';
 import { FIELD_SIZE_INCHES, ROBOT_SIZE_INCHES } from './constants';
+import { PIDController } from './utils/pid';
 
 const ConfigInput: React.FC<{
   label: string, 
@@ -111,11 +112,32 @@ const App: React.FC = () => {
   const r1Wheels = useRef<number[]>([0, 0, 0, 0]);
   const r2Wheels = useRef<number[]>([0, 0, 0, 0]);
 
+  // PID controllers per wheel motor (smooth acceleration / deceleration)
+  // Gains: Kp=8 snappy response, Ki=0.3 eliminates steady-state error, Kd=0.4 dampens overshoot
+  const r1MotorPIDs = useRef([
+    new PIDController(8, 0.3, 0.4),
+    new PIDController(8, 0.3, 0.4),
+    new PIDController(8, 0.3, 0.4),
+    new PIDController(8, 0.3, 0.4),
+  ]);
+  const r2MotorPIDs = useRef([
+    new PIDController(8, 0.3, 0.4),
+    new PIDController(8, 0.3, 0.4),
+    new PIDController(8, 0.3, 0.4),
+    new PIDController(8, 0.3, 0.4),
+  ]);
+
+  // Heading-hold PID: corrects drift when driver is NOT actively turning
+  // Kp=3.5 proportional correction, Ki=0, Kd=0.8 dampens oscillation
+  const r1HeadingPID = useRef(new PIDController(3.5, 0, 0.8));
+  const r2HeadingPID = useRef(new PIDController(3.5, 0, 0.8));
+  const r1TargetHeading = useRef<number | null>(null);
+  const r2TargetHeading = useRef<number | null>(null);
+
   // ── Mecanum physics constants ──
   const MAX_FORWARD_SPEED = 76.5;                      // in/s (forward / backward)
   const MAX_STRAFE_SPEED  = MAX_FORWARD_SPEED * 0.80;  // ~80 % — roller slip penalty
   const MAX_ROT_SPEED     = 5.5;                       // rad/s
-  const MOTOR_RESPONSE    = 6.0;                       // wheel accel rate (1/s)
   const COAST_FRICTION    = 4.5;                       // wheel decel when idle (1/s)
 
   const allianceThemeColor = alliance === 'red' ? 'text-red-500' : 'text-blue-500';
@@ -153,6 +175,12 @@ const App: React.FC = () => {
     if (!isRunning) {
       r1Wheels.current = [0, 0, 0, 0];
       r2Wheels.current = [0, 0, 0, 0];
+      r1MotorPIDs.current.forEach(p => p.reset());
+      r2MotorPIDs.current.forEach(p => p.reset());
+      r1HeadingPID.current.reset();
+      r2HeadingPID.current.reset();
+      r1TargetHeading.current = null;
+      r2TargetHeading.current = null;
       setIsShootingMode(false);
     }
   }, [isRunning]);
@@ -240,11 +268,14 @@ const App: React.FC = () => {
 
         
 
-        // ── Full mecanum kinematics (Tier B) ──
+        // ── Full mecanum kinematics (Tier B) + PID ──
         const getMecanumPhysics = (
           axes: number[],
           state: RobotState,
-          wheels: { current: number[] }
+          wheels: { current: number[] },
+          motorPIDs: PIDController[],
+          headingPID: PIDController,
+          targetHeadingRef: { current: number | null }
         ) => {
           // 1. Joystick → robot-intent
           let inputY = -axes[1];   // forward  (stick up = +)
@@ -254,7 +285,7 @@ const App: React.FC = () => {
           // 2. Field-centric: rotate stick vector into robot frame
           if (driveModeRef.current === 'field') {
             let h = state.heading;
-            if (allianceRef.current === 'red') h += Math.PI; // red faces opposite
+            if (allianceRef.current === 'red') h += Math.PI;
             const c = Math.cos(-h);
             const s = Math.sin(-h);
             const rx = inputX * c - inputY * s;
@@ -263,26 +294,42 @@ const App: React.FC = () => {
             inputY = ry;
           }
 
-          // 3. Forward kinematics → target wheel powers  (X-pattern)
-          //    FL = vy + vx + ω    FR = vy − vx − ω
-          //    BL = vy − vx + ω    BR = vy + vx − ω
+          // 3. Heading-hold PID: when driver is NOT turning, maintain heading
+          const isTurning = Math.abs(inputW) > 0.08;
+          if (isTurning) {
+            targetHeadingRef.current = null;
+            headingPID.reset();
+          } else {
+            if (targetHeadingRef.current === null) {
+              targetHeadingRef.current = state.heading;
+            }
+            let headingError = targetHeadingRef.current - state.heading;
+            while (headingError > Math.PI)  headingError -= 2 * Math.PI;
+            while (headingError < -Math.PI) headingError += 2 * Math.PI;
+            headingPID.setTarget(0);
+            const correction = headingPID.update(-headingError, dt);
+            inputW += clamp(correction, -0.3, 0.3);
+          }
+
+          // 4. Forward kinematics → target wheel powers (X-pattern)
           const tFL = inputY + inputX + inputW;
           const tBL = inputY - inputX + inputW;
           const tFR = inputY - inputX - inputW;
           const tBR = inputY + inputX - inputW;
 
-          // 4. Normalize so no motor exceeds |1|
+          // 5. Normalize so no motor exceeds |1|
           const mx = Math.max(1, Math.abs(tFL), Math.abs(tBL), Math.abs(tFR), Math.abs(tBR));
-          const nFL = tFL / mx, nBL = tBL / mx, nFR = tFR / mx, nBR = tBR / mx;
+          const targets = [tFL / mx, tBL / mx, tFR / mx, tBR / mx];
 
-          // 5. Motor response — wheels ramp toward target (acceleration limit)
-          const acc = MOTOR_RESPONSE * dt;
-          wheels.current[0] += clamp(nFL - wheels.current[0], -acc, acc);
-          wheels.current[1] += clamp(nBL - wheels.current[1], -acc, acc);
-          wheels.current[2] += clamp(nFR - wheels.current[2], -acc, acc);
-          wheels.current[3] += clamp(nBR - wheels.current[3], -acc, acc);
+          // 6. PID motor response — each wheel has its own PID controller
+          for (let i = 0; i < 4; i++) {
+            motorPIDs[i].setTarget(targets[i]);
+            const output = motorPIDs[i].update(wheels.current[i], dt);
+            wheels.current[i] += clamp(output * dt, -0.5, 0.5);
+            wheels.current[i] = clamp(wheels.current[i], -1, 1);
+          }
 
-          // 6. Coast friction — bleed off speed when sticks are centred
+          // 7. Coast friction — bleed off speed when sticks are centred
           const stick = Math.abs(inputX) + Math.abs(inputY) + Math.abs(inputW);
           if (stick < 0.05) {
             const fr = COAST_FRICTION * dt;
@@ -292,18 +339,18 @@ const App: React.FC = () => {
             }
           }
 
-          // 7. Inverse kinematics → robot-frame velocity
+          // 8. Inverse kinematics → robot-frame velocity
           const [fl, bl, fr, br] = wheels.current;
-          const vy_r = (fl + bl + fr + br) / 4;   // forward
-          const vx_r = (fl - bl - fr + br) / 4;   // strafe R
-          const om   = (fl + bl - fr - br) / 4;   // CCW
+          const vy_r = (fl + bl + fr + br) / 4;
+          const vx_r = (fl - bl - fr + br) / 4;
+          const om   = (fl + bl - fr - br) / 4;
 
-          // 8. Scale to real units (strafe gets roller-slip penalty)
+          // 9. Scale to real units (strafe gets roller-slip penalty)
           const vyReal = vy_r * MAX_FORWARD_SPEED;
           const vxReal = vx_r * MAX_STRAFE_SPEED;
           const omReal = om   * MAX_ROT_SPEED;
 
-          // 9. Robot-frame → world-frame
+          // 10. Robot-frame → world-frame
           const h = state.heading;
           const world_dx = (vyReal * Math.cos(h) - vxReal * Math.sin(h)) * dt;
           const world_dy = (vyReal * Math.sin(h) + vxReal * Math.cos(h)) * dt;
@@ -314,7 +361,7 @@ const App: React.FC = () => {
         setRobot(currentRobot => {
           const axes = getAxes(0);
           const buttons = getButtons(0);
-          const { world_dx, world_dy, nh } = getMecanumPhysics(axes, currentRobot, r1Wheels);
+          const { world_dx, world_dy, nh } = getMecanumPhysics(axes, currentRobot, r1Wheels, r1MotorPIDs.current, r1HeadingPID.current, r1TargetHeading);
           
           let nx = currentRobot.pos.x + world_dx;
           let ny = currentRobot.pos.y + world_dy;
@@ -450,7 +497,7 @@ const App: React.FC = () => {
           setPartner(currentPartner => {
             const axes = getAxes(1);
             const buttons = getButtons(1);
-            const { world_dx, world_dy, nh } = getMecanumPhysics(axes, currentPartner, r2Wheels);
+            const { world_dx, world_dy, nh } = getMecanumPhysics(axes, currentPartner, r2Wheels, r2MotorPIDs.current, r2HeadingPID.current, r2TargetHeading);
             
             let nx = currentPartner.pos.x + world_dx;
             let ny = currentPartner.pos.y + world_dy;
