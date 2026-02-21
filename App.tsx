@@ -107,6 +107,9 @@ const App: React.FC = () => {
   const partnerShootCooldownRef = useRef(false);
   const intakeCooldownRef = useRef(false);
   const partnerIntakeCooldownRef = useRef(false);
+  const relocalizeCooldownRef = useRef(false);
+  const [relocalizeCooldown, setRelocalizeCooldown] = useState(0); // seconds remaining
+  const RELOCALIZE_COOLDOWN_SEC = 5;
   
   // Mecanum wheel states [FL, BL, FR, BR] normalised –1…1
   const r1Wheels = useRef<number[]>([0, 0, 0, 0]);
@@ -329,7 +332,7 @@ const App: React.FC = () => {
             wheels.current[i] = clamp(wheels.current[i], -1, 1);
           }
 
-          // 7. Coast friction — bleed off speed when sticks are centred
+          
           const stick = Math.abs(inputX) + Math.abs(inputY) + Math.abs(inputW);
           if (stick < 0.05) {
             const fr = COAST_FRICTION * dt;
@@ -339,18 +342,16 @@ const App: React.FC = () => {
             }
           }
 
-          // 8. Inverse kinematics → robot-frame velocity
           const [fl, bl, fr, br] = wheels.current;
           const vy_r = (fl + bl + fr + br) / 4;
           const vx_r = (fl - bl - fr + br) / 4;
           const om   = (fl + bl - fr - br) / 4;
-
-          // 9. Scale to real units (strafe gets roller-slip penalty)
+          
           const vyReal = vy_r * MAX_FORWARD_SPEED;
           const vxReal = vx_r * MAX_STRAFE_SPEED;
           const omReal = om   * MAX_ROT_SPEED;
 
-          // 10. Robot-frame → world-frame
+         // робот фрейм в филд фрейм
           const h = state.heading;
           const world_dx = (vyReal * Math.cos(h) - vxReal * Math.sin(h)) * dt;
           const world_dy = (vyReal * Math.sin(h) + vxReal * Math.cos(h)) * dt;
@@ -382,8 +383,8 @@ const App: React.FC = () => {
           if (buttons[4]) setIsShootingMode(true);
           if (buttons[0] || buttons[3]) setIsShootingMode(false);
 
-          // L2 button (6) for relocalize
-          if (buttons[6]) {
+          // L2 button (6) for relocalize (with cooldown)
+          if (buttons[6] && !relocalizeCooldownRef.current) {
             const hpCorner = allianceRef.current === 'red' ? { x: 120, y: 120 } : { x: 24, y: 120 };
             const distToCorner = Math.sqrt(
               Math.pow(nextRobot.pos.x - positionDrift.x - hpCorner.x, 2) + 
@@ -393,6 +394,14 @@ const App: React.FC = () => {
               setPositionDrift({ x: 0, y: 0 });
               setHeadingDrift(0);
               matchStartTime.current = performance.now();
+              relocalizeCooldownRef.current = true;
+              setRelocalizeCooldown(RELOCALIZE_COOLDOWN_SEC);
+              const tick = setInterval(() => {
+                setRelocalizeCooldown(prev => {
+                  if (prev <= 1) { clearInterval(tick); relocalizeCooldownRef.current = false; return 0; }
+                  return prev - 1;
+                });
+              }, 1000);
             }
           }
 
@@ -646,6 +655,7 @@ const App: React.FC = () => {
   };
   
   const relocalize = () => {
+    if (relocalizeCooldownRef.current) return;
     // Reset odometry drift when robot is in Human Player corner
     const hpCorner = alliance === 'red' ? { x: 120, y: 120 } : { x: 24, y: 120 };
     const distToCorner = Math.sqrt(
@@ -657,6 +667,14 @@ const App: React.FC = () => {
       setPositionDrift({ x: 0, y: 0 });
       setHeadingDrift(0);
       matchStartTime.current = performance.now();
+      relocalizeCooldownRef.current = true;
+      setRelocalizeCooldown(RELOCALIZE_COOLDOWN_SEC);
+      const tick = setInterval(() => {
+        setRelocalizeCooldown(prev => {
+          if (prev <= 1) { clearInterval(tick); relocalizeCooldownRef.current = false; return 0; }
+          return prev - 1;
+        });
+      }, 1000);
     }
   };
 
@@ -738,8 +756,9 @@ const App: React.FC = () => {
             {/* Relocalization Button */}
             <button
               onClick={relocalize}
-              className={`w-full py-3 rounded-xl font-black text-xs uppercase tracking-wider transition-all ${
+              className={`w-full py-3 rounded-xl font-black text-xs uppercase tracking-wider transition-all relative overflow-hidden ${
                 (() => {
+                  if (relocalizeCooldown > 0) return 'bg-neutral-800 opacity-60 cursor-not-allowed';
                   const hpCorner = alliance === 'red' ? { x: 120, y: 120 } : { x: 24, y: 120 };
                   const distToCorner = Math.sqrt(
                     Math.pow(robot.pos.x - positionDrift.x - hpCorner.x, 2) + 
@@ -750,8 +769,14 @@ const App: React.FC = () => {
                     : 'bg-neutral-800 opacity-50 cursor-not-allowed';
                 })()
               }`}
+              disabled={relocalizeCooldown > 0}
             >
-              🎯 RELOCALIZE
+              {relocalizeCooldown > 0 ? (
+                <span className="flex items-center justify-center gap-2">
+                  <span className="w-4 h-4 border-2 border-white/40 border-t-white rounded-full animate-spin"></span>
+                  COOLDOWN {relocalizeCooldown}s
+                </span>
+              ) : '🎯 RELOCALIZE'}
             </button>
           </div>
         )}
