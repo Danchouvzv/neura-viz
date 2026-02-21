@@ -71,6 +71,9 @@ export const useGamepad = () => {
         // L1 (Button 4) fallback: '1' or 'l'
         if (internalKeys.current.has('1') || internalKeys.current.has('l')) newButtons[0][4] = true;
         
+        // L2 (Button 6) fallback: 'z'
+        if (internalKeys.current.has('z')) newButtons[0][6] = true;
+        
         // X button (Button 0 or 2) fallback: 'x' or '3'
         if (internalKeys.current.has('x') || internalKeys.current.has('3')) {
            newButtons[0][0] = true;

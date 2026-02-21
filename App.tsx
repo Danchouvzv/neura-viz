@@ -244,15 +244,50 @@ const App: React.FC = () => {
         
 
         const getPhysInput = (axes: number[], state: RobotState, vel: any, rot: any, p: any) => {
-          const targetFwd = -axes[1] * MAX_SPEED;
-          const targetStr = axes[0] * MAX_SPEED;
-          const targetRot = axes[2] * MAX_ROT_SPEED;
+          // Mecanum wheel physics - realistic speed modifiers
+          const fwd = -axes[1];
+          const strafe = axes[0];
+          const turn = axes[2];
+          
+          // Calculate movement vector magnitude
+          const driveVector = Math.sqrt(fwd * fwd + strafe * strafe);
+          
+          // Speed modifiers based on movement type (mecanum characteristics)
+          let speedMultiplier = 1.0;
+          
+          if (driveVector > 0.1) {
+            // Pure strafe (sideways) is slower on mecanum wheels (~70% efficiency)
+            const strafeRatio = Math.abs(strafe) / (driveVector + 0.001);
+            const forwardRatio = Math.abs(fwd) / (driveVector + 0.001);
+            
+            if (strafeRatio > 0.9) {
+              // Almost pure strafe
+              speedMultiplier = 0.72;
+            } else if (strafeRatio > 0.5) {
+              // Diagonal movement - mix of strafe and forward
+              speedMultiplier = 0.85;
+            } else {
+              // Mostly forward/backward - full speed
+              speedMultiplier = 1.0;
+            }
+          }
+          
+          // Turning while driving reduces speed (realistic motor load distribution)
+          if (driveVector > 0.1 && Math.abs(turn) > 0.1) {
+            const turnPenalty = Math.abs(turn) * 0.25; // Up to 25% speed reduction
+            speedMultiplier *= (1.0 - turnPenalty);
+          }
+          
+          // Pure rotation (no drive) uses different max speed
+          const effectiveMaxSpeed = driveVector < 0.05 ? MAX_SPEED : MAX_SPEED * speedMultiplier;
+          
+          const targetFwd = fwd * effectiveMaxSpeed;
+          const targetStr = strafe * effectiveMaxSpeed;
+          const targetRot = turn * MAX_ROT_SPEED;
 
           p.x.setTarget(targetStr);
           p.y.setTarget(targetFwd);
           p.h.setTarget(targetRot);
-
-    
 
           vel.current.x += p.x.update(vel.current.x, dt) * dt;
           vel.current.y += p.y.update(vel.current.y, dt) * dt;
@@ -303,7 +338,16 @@ const App: React.FC = () => {
 
           // L2 button (6) for relocalize
           if (buttons[6]) {
-            relocalize();
+            const hpCorner = allianceRef.current === 'red' ? { x: 120, y: 120 } : { x: 24, y: 120 };
+            const distToCorner = Math.sqrt(
+              Math.pow(nextRobot.pos.x - positionDrift.x - hpCorner.x, 2) + 
+              Math.pow(nextRobot.pos.y - positionDrift.y - hpCorner.y, 2)
+            );
+            if (distToCorner < 20) {
+              setPositionDrift({ x: 0, y: 0 });
+              setHeadingDrift(0);
+              matchStartTime.current = performance.now();
+            }
           }
 
           if (buttons[7]) { 
@@ -603,7 +647,7 @@ const App: React.FC = () => {
             NEURA<span className={isRunning ? allianceThemeColor : 'text-purple-500'}>VIZ</span>
           </h1>
           <p className="text-[10px] font-mono text-neutral-500 mt-2 uppercase tracking-widest leading-relaxed">
-            L1: ARM (SHOOT) | R2: ACTION
+            L1: ARM (SHOOT) | R2: ACTION | L2: RELOCALIZE
           </p>
         </div>
 
@@ -790,7 +834,7 @@ const App: React.FC = () => {
                     <span className="text-yellow-400 text-lg">⚠️</span>
                     <span className="text-yellow-200 font-bold text-sm uppercase">Odometry Drift Detected</span>
                   </div>
-                  <p className="text-yellow-300/70 text-xs text-center mt-1">Drive to HP corner and relocalize (L2)</p>
+                  <p className="text-yellow-300/70 text-xs text-center mt-1">Drive to HP corner and relocalize</p>
                 </div>
               )}
               
@@ -847,7 +891,6 @@ const App: React.FC = () => {
                  <span>L1: ARM SHOOT</span>
                  <span>△/X: DISARM</span>
                  <span>R2: ACTION</span>
-                 <span>L2: RELOCALIZE</span>
               </div>
             </div>
           )}

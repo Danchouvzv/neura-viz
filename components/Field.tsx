@@ -50,16 +50,11 @@ const Field: React.FC<FieldProps> = ({ robot, width, height, samples, launchedSa
 
   // Helper function to transform coordinates based on alliance
   const transformCoord = (x: number, y: number) => {
-    // First apply 90 degree rotation (swap x,y)
-    let tx = y;
-    let ty = height - x;
-    
     if (alliance === 'red') {
-      // Then flip for red alliance
-      tx = height - tx;
-      ty = width - ty;
+      // Flip field for red alliance (180 degree rotation)
+      return { x: width - x, y: height - y };
     }
-    return { x: tx, y: ty };
+    return { x, y };
   };
 
   const transformRobotHeading = (heading: number) => {
@@ -77,33 +72,27 @@ const Field: React.FC<FieldProps> = ({ robot, width, height, samples, launchedSa
 
     ctx.clearRect(0, 0, width, height);
 
-    // Rotate field 90 degrees clockwise so drivers are on the sides
-    ctx.translate(width / 2, height / 2);
-    ctx.rotate(Math.PI / 2);
-    
-    // Apply alliance-specific transformation (flip for red alliance)
+    // Apply field transformation for red alliance
     if (alliance === 'red') {
+      ctx.translate(width, height);
       ctx.rotate(Math.PI);
     }
-    
-    // Adjust for rotation - swap width/height and center
-    ctx.translate(-height / 2, -width / 2);
 
     if (images.field) {
-      ctx.drawImage(images.field, 0, 0, height, width);
+      ctx.drawImage(images.field, 0, 0, width, height);
     } else {
       ctx.fillStyle = '#111';
-      ctx.fillRect(0, 0, height, width);
+      ctx.fillRect(0, 0, width, height);
     }
 
     // Draw Static "Solid" Corner Baskets
     const basketSizePx = toPx(24.5);
     
-    // Blue Basket - after 90 degree rotation, positions change
+    // Blue Basket (Top Left for blue alliance, top right for red alliance)
     ctx.save();
     const blueBasketPos = alliance === 'blue' 
       ? { x: 0, y: 0 } 
-      : { x: height - basketSizePx, y: width - basketSizePx };
+      : { x: width - basketSizePx, y: height - basketSizePx };
     ctx.beginPath();
     ctx.rect(blueBasketPos.x, blueBasketPos.y, basketSizePx, basketSizePx);
     ctx.fillStyle = (isShootingMode && alliance === 'blue') ? 'rgba(37, 99, 235, 0.4)' : 'rgba(37, 99, 235, 0.1)';
@@ -123,11 +112,11 @@ const Field: React.FC<FieldProps> = ({ robot, width, height, samples, launchedSa
     ctx.stroke();
     ctx.restore();
 
-    // Red Basket - after 90 degree rotation
+    // Red Basket (Top Right for blue alliance, top left for red alliance)
     ctx.save();
     const redBasketPos = alliance === 'blue' 
-      ? { x: height - basketSizePx, y: 0 } 
-      : { x: 0, y: width - basketSizePx };
+      ? { x: width - basketSizePx, y: 0 } 
+      : { x: 0, y: height - basketSizePx };
     ctx.beginPath();
     ctx.rect(redBasketPos.x, redBasketPos.y, basketSizePx, basketSizePx);
     ctx.fillStyle = (isShootingMode && alliance === 'red') ? 'rgba(220, 38, 38, 0.4)' : 'rgba(220, 38, 38, 0.1)';
@@ -210,7 +199,7 @@ const Field: React.FC<FieldProps> = ({ robot, width, height, samples, launchedSa
           vy_current = vy * scale;
         } else {
           // Miss trajectory - aggressive overshoot then drop
-          const targetX = alliance === 'red' ? (ls.target.x > 72 ? 0 : height) : (ls.target.x > 72 ? height : 0);
+          const targetX = alliance === 'red' ? (ls.target.x > 72 ? 0 : width) : (ls.target.x > 72 ? width : 0);
           const targetY = 0;
           const basketX = targetX;
           const basketY = targetY;
