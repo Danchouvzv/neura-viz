@@ -5,6 +5,7 @@ import { useGamepad } from './hooks/useGamepad';
 import { RobotState, Vector2, Sample, SampleType, LaunchedSample, Alliance } from './types';
 import { FIELD_SIZE_INCHES, ROBOT_SIZE_INCHES } from './constants';
 import { PIDController } from './utils/pid';
+import { PhysicsState, stepMecanumPhysics, resolveRobotCollision } from './utils/mecanumPhysics';
 
 const ConfigInput: React.FC<{
   label: string, 
@@ -111,24 +112,15 @@ const App: React.FC = () => {
   const [relocalizeCooldown, setRelocalizeCooldown] = useState(0); // seconds remaining
   const RELOCALIZE_COOLDOWN_SEC = 5;
   
-  // Mecanum wheel states [FL, BL, FR, BR] normalised –1…1
-  const r1Wheels = useRef<number[]>([0, 0, 0, 0]);
-  const r2Wheels = useRef<number[]>([0, 0, 0, 0]);
-
-  // PID controllers per wheel motor (smooth acceleration / deceleration)
-  // Gains: Kp=8 snappy response, Ki=0.3 eliminates steady-state error, Kd=0.4 dampens overshoot
-  const r1MotorPIDs = useRef([
-    new PIDController(8, 0.3, 0.4),
-    new PIDController(8, 0.3, 0.4),
-    new PIDController(8, 0.3, 0.4),
-    new PIDController(8, 0.3, 0.4),
-  ]);
-  const r2MotorPIDs = useRef([
-    new PIDController(8, 0.3, 0.4),
-    new PIDController(8, 0.3, 0.4),
-    new PIDController(8, 0.3, 0.4),
-    new PIDController(8, 0.3, 0.4),
-  ]);
+  // Full FTC physics state refs (force-based DC motor + anisotropic friction simulation)
+  const r1Physics = useRef<PhysicsState>({
+    pos: { x: 72, y: 120 }, heading: -Math.PI / 2,
+    vel: { x: 0, y: 0 }, omega: 0, wheelSpeeds: [0, 0, 0, 0]
+  });
+  const r2Physics = useRef<PhysicsState>({
+    pos: { x: 24, y: 120 }, heading: -Math.PI / 2,
+    vel: { x: 0, y: 0 }, omega: 0, wheelSpeeds: [0, 0, 0, 0]
+  });
 
   // Heading-hold PID: corrects drift when driver is NOT actively turning
   // Kp=3.5 proportional correction, Ki=0, Kd=0.8 dampens oscillation
@@ -136,12 +128,6 @@ const App: React.FC = () => {
   const r2HeadingPID = useRef(new PIDController(3.5, 0, 0.8));
   const r1TargetHeading = useRef<number | null>(null);
   const r2TargetHeading = useRef<number | null>(null);
-
-  // ── Mecanum physics constants ──
-  const MAX_FORWARD_SPEED = 76.5;                      // in/s (forward / backward)
-  const MAX_STRAFE_SPEED  = MAX_FORWARD_SPEED * 0.80;  // ~80 % — roller slip penalty
-  const MAX_ROT_SPEED     = 5.5;                       // rad/s
-  const COAST_FRICTION    = 4.5;                       // wheel decel when idle (1/s)
 
   const allianceThemeColor = alliance === 'red' ? 'text-red-500' : 'text-blue-500';
   const allianceBgColor = alliance === 'red' ? 'bg-red-600' : 'bg-blue-600';
@@ -176,10 +162,12 @@ const App: React.FC = () => {
 
   useEffect(() => {
     if (!isRunning) {
-      r1Wheels.current = [0, 0, 0, 0];
-      r2Wheels.current = [0, 0, 0, 0];
-      r1MotorPIDs.current.forEach(p => p.reset());
-      r2MotorPIDs.current.forEach(p => p.reset());
+      r1Physics.current.vel = { x: 0, y: 0 };
+      r1Physics.current.omega = 0;
+      r1Physics.current.wheelSpeeds = [0, 0, 0, 0];
+      r2Physics.current.vel = { x: 0, y: 0 };
+      r2Physics.current.omega = 0;
+      r2Physics.current.wheelSpeeds = [0, 0, 0, 0];
       r1HeadingPID.current.reset();
       r2HeadingPID.current.reset();
       r1TargetHeading.current = null;
@@ -271,23 +259,20 @@ const App: React.FC = () => {
 
         
 
-        // ── Full mecanum kinematics (Tier B) + PID ──
-        const getMecanumPhysics = (
+        // ── Force-based FTC physics: joystick → motor commands → physics engine ──
+        const computeMotorCommands = (
           axes: number[],
-          state: RobotState,
-          wheels: { current: number[] },
-          motorPIDs: PIDController[],
+          heading: number,
           headingPID: PIDController,
           targetHeadingRef: { current: number | null }
-        ) => {
-          // 1. Joystick → robot-intent
+        ): number[] => {
           let inputY = -axes[1];   // forward  (stick up = +)
           let inputX =  axes[0];   // strafe R (stick right = +)
           let inputW =  axes[2];   // rotate CW
 
-          // 2. Field-centric: rotate stick vector into robot frame
+          // Field-centric: rotate stick vector into robot frame
           if (driveModeRef.current === 'field') {
-            let h = state.heading;
+            let h = heading;
             if (allianceRef.current === 'red') h += Math.PI;
             const c = Math.cos(-h);
             const s = Math.sin(-h);
@@ -297,16 +282,16 @@ const App: React.FC = () => {
             inputY = ry;
           }
 
-          // 3. Heading-hold PID: when driver is NOT turning, maintain heading
+          // Heading-hold PID: when driver is NOT turning, maintain heading
           const isTurning = Math.abs(inputW) > 0.08;
           if (isTurning) {
             targetHeadingRef.current = null;
             headingPID.reset();
           } else {
             if (targetHeadingRef.current === null) {
-              targetHeadingRef.current = state.heading;
+              targetHeadingRef.current = heading;
             }
-            let headingError = targetHeadingRef.current - state.heading;
+            let headingError = targetHeadingRef.current - heading;
             while (headingError > Math.PI)  headingError -= 2 * Math.PI;
             while (headingError < -Math.PI) headingError += 2 * Math.PI;
             headingPID.setTarget(0);
@@ -314,71 +299,27 @@ const App: React.FC = () => {
             inputW += clamp(correction, -0.3, 0.3);
           }
 
-          // 4. Forward kinematics → target wheel powers (X-pattern)
+          // Inverse kinematics → motor power commands (X-pattern mecanum)
           const tFL = inputY + inputX + inputW;
           const tBL = inputY - inputX + inputW;
           const tFR = inputY - inputX - inputW;
           const tBR = inputY + inputX - inputW;
 
-          // 5. Normalize so no motor exceeds |1|
+          // Normalize so no motor exceeds |1|
           const mx = Math.max(1, Math.abs(tFL), Math.abs(tBL), Math.abs(tFR), Math.abs(tBR));
-          const targets = [tFL / mx, tBL / mx, tFR / mx, tBR / mx];
-
-          // 6. PID motor response — each wheel has its own PID controller
-          for (let i = 0; i < 4; i++) {
-            motorPIDs[i].setTarget(targets[i]);
-            const output = motorPIDs[i].update(wheels.current[i], dt);
-            wheels.current[i] += clamp(output * dt, -0.5, 0.5);
-            wheels.current[i] = clamp(wheels.current[i], -1, 1);
-          }
-
-          
-          const stick = Math.abs(inputX) + Math.abs(inputY) + Math.abs(inputW);
-          if (stick < 0.05) {
-            const fr = COAST_FRICTION * dt;
-            for (let i = 0; i < 4; i++) {
-              if (Math.abs(wheels.current[i]) < fr) wheels.current[i] = 0;
-              else wheels.current[i] -= Math.sign(wheels.current[i]) * fr;
-            }
-          }
-
-          const [fl, bl, fr, br] = wheels.current;
-          const vy_r = (fl + bl + fr + br) / 4;
-          const vx_r = (fl - bl - fr + br) / 4;
-          const om   = (fl + bl - fr - br) / 4;
-          
-          const vyReal = vy_r * MAX_FORWARD_SPEED;
-          const vxReal = vx_r * MAX_STRAFE_SPEED;
-          const omReal = om   * MAX_ROT_SPEED;
-
-         // робот фрейм в филд фрейм
-          const h = state.heading;
-          const world_dx = (vyReal * Math.cos(h) - vxReal * Math.sin(h)) * dt;
-          const world_dy = (vyReal * Math.sin(h) + vxReal * Math.cos(h)) * dt;
-
-          return { world_dx, world_dy, nh: normalizeRadians(h + omReal * dt) };
+          return [tFL / mx, tBL / mx, tFR / mx, tBR / mx];
         };
 
         setRobot(currentRobot => {
           const axes = getAxes(0);
           const buttons = getButtons(0);
-          const { world_dx, world_dy, nh } = getMecanumPhysics(axes, currentRobot, r1Wheels, r1MotorPIDs.current, r1HeadingPID.current, r1TargetHeading);
-          
-          let nx = currentRobot.pos.x + world_dx;
-          let ny = currentRobot.pos.y + world_dy;
 
-          const mx = currentRobot.size.x / 2, my = currentRobot.size.y / 2;
-          nx = Math.max(mx, Math.min(FIELD_SIZE_INCHES - mx, nx));
-          ny = Math.max(my, Math.min(FIELD_SIZE_INCHES - my, ny));
+          // Compute motor power commands from joystick + heading-hold
+          const motorPowers = computeMotorCommands(axes, r1Physics.current.heading, r1HeadingPID.current, r1TargetHeading);
+          // Step the force-based physics engine (DC motor torque → wheel forces → rigid body integration → collisions)
+          r1Physics.current = stepMecanumPhysics(r1Physics.current, motorPowers, dt, FIELD_SIZE_INCHES, currentRobot.size.x);
 
-          const basketSize = 24.5;
-          const collisionBuffer = 10;
-          const limit = basketSize + collisionBuffer;
-
-          if (nx + ny < limit) { nx += (limit - (nx + ny)) * 0.5; ny += (limit - (nx + ny)) * 0.5; }
-          if ((FIELD_SIZE_INCHES - nx) + ny < limit) { nx -= (limit - ((FIELD_SIZE_INCHES - nx) + ny)) * 0.5; ny += (limit - ((FIELD_SIZE_INCHES - nx) + ny)) * 0.5; }
-
-          let nextRobot = { ...currentRobot, pos: { x: nx, y: ny }, heading: nh };
+          let nextRobot = { ...currentRobot, pos: { x: r1Physics.current.pos.x, y: r1Physics.current.pos.y }, heading: r1Physics.current.heading };
           
           if (buttons[4]) setIsShootingMode(true);
           if (buttons[0] || buttons[3]) setIsShootingMode(false);
@@ -387,8 +328,8 @@ const App: React.FC = () => {
           if (buttons[6] && !relocalizeCooldownRef.current) {
             const hpCorner = allianceRef.current === 'red' ? { x: 120, y: 120 } : { x: 24, y: 120 };
             const distToCorner = Math.sqrt(
-              Math.pow(nextRobot.pos.x - positionDrift.x - hpCorner.x, 2) + 
-              Math.pow(nextRobot.pos.y - positionDrift.y - hpCorner.y, 2)
+              Math.pow(nextRobot.pos.x - hpCorner.x, 2) + 
+              Math.pow(nextRobot.pos.y - hpCorner.y, 2)
             );
             if (distToCorner < 20) {
               setPositionDrift({ x: 0, y: 0 });
@@ -506,23 +447,11 @@ const App: React.FC = () => {
           setPartner(currentPartner => {
             const axes = getAxes(1);
             const buttons = getButtons(1);
-            const { world_dx, world_dy, nh } = getMecanumPhysics(axes, currentPartner, r2Wheels, r2MotorPIDs.current, r2HeadingPID.current, r2TargetHeading);
-            
-            let nx = currentPartner.pos.x + world_dx;
-            let ny = currentPartner.pos.y + world_dy;
 
-            const mx = currentPartner.size.x / 2, my = currentPartner.size.y / 2;
-            nx = Math.max(mx, Math.min(FIELD_SIZE_INCHES - mx, nx));
-            ny = Math.max(my, Math.min(FIELD_SIZE_INCHES - my, ny));
+            const motorPowers = computeMotorCommands(axes, r2Physics.current.heading, r2HeadingPID.current, r2TargetHeading);
+            r2Physics.current = stepMecanumPhysics(r2Physics.current, motorPowers, dt, FIELD_SIZE_INCHES, currentPartner.size.x);
 
-            const basketSize = 24.5;
-            const collisionBuffer = 10;
-            const limit = basketSize + collisionBuffer;
-
-            if (nx + ny < limit) { nx += (limit - (nx + ny)) * 0.5; ny += (limit - (nx + ny)) * 0.5; }
-            if ((FIELD_SIZE_INCHES - nx) + ny < limit) { nx -= (limit - ((FIELD_SIZE_INCHES - nx) + ny)) * 0.5; ny += (limit - ((FIELD_SIZE_INCHES - nx) + ny)) * 0.5; }
-
-            let nextPartner = { ...currentPartner, pos: { x: nx, y: ny }, heading: nh };
+            let nextPartner = { ...currentPartner, pos: { x: r2Physics.current.pos.x, y: r2Physics.current.pos.y }, heading: r2Physics.current.heading };
 
             if (buttons[7]) { 
               if (isShootingModeRef.current) {
@@ -614,27 +543,14 @@ const App: React.FC = () => {
         }
 
         if (partnerActiveRef.current) {
-          setRobot(r => {
-            setPartner(p => {
-              const dx = r.pos.x - p.pos.x;
-              const dy = r.pos.y - p.pos.y;
-              const dist = Math.sqrt(dx * dx + dy * dy);
-              const minDist = (r.size.x + p.size.x) / 1.8;
-              
-              if (dist < minDist && dist > 0.01) {
-                const overlap = (minDist - dist) * 0.5;
-                const pushX = (dx / dist) * overlap;
-                const pushY = (dy / dist) * overlap;
-                
-                r.pos.x += pushX;
-                r.pos.y += pushY;
-                p.pos.x -= pushX;
-                p.pos.y -= pushY;
-              }
-              return { ...p };
-            });
-            return { ...r };
-          });
+          const collResult = resolveRobotCollision(
+            r1Physics.current, ROBOT_SIZE_INCHES,
+            r2Physics.current, ROBOT_SIZE_INCHES
+          );
+          r1Physics.current = collResult.a;
+          r2Physics.current = collResult.b;
+          setRobot(r => ({ ...r, pos: { ...collResult.a.pos }, heading: collResult.a.heading }));
+          setPartner(p => ({ ...p, pos: { ...collResult.b.pos }, heading: collResult.b.heading }));
         }
       }
       animationId = requestAnimationFrame(loop);
@@ -688,15 +604,18 @@ const App: React.FC = () => {
     setHeadingDrift(0);
     matchStartTime.current = performance.now();
     const spawnX = chosenAlliance === 'red' ? 120 : 24;
+    r1Physics.current = { pos: { x: spawnX, y: 120 }, heading: -Math.PI / 2, vel: { x: 0, y: 0 }, omega: 0, wheelSpeeds: [0, 0, 0, 0] };
     setRobot(prev => ({
         ...prev,
         pos: { x: spawnX, y: 120 },
         heading: -Math.PI / 2
     }));
     if (partnerActive) {
+      const partnerX = spawnX + (chosenAlliance === 'red' ? -24 : 24);
+      r2Physics.current = { pos: { x: partnerX, y: 120 }, heading: -Math.PI / 2, vel: { x: 0, y: 0 }, omega: 0, wheelSpeeds: [0, 0, 0, 0] };
       setPartner(prev => ({
         ...prev,
-        pos: { x: spawnX + (chosenAlliance === 'red' ? -24 : 24), y: 120 },
+        pos: { x: partnerX, y: 120 },
         heading: -Math.PI / 2
       }));
     }
