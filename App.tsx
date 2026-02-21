@@ -4,7 +4,6 @@ import Field from './components/Field';
 import { useGamepad } from './hooks/useGamepad';
 import { RobotState, Vector2, Sample, SampleType, LaunchedSample, Alliance } from './types';
 import { FIELD_SIZE_INCHES, ROBOT_SIZE_INCHES } from './constants';
-import { PIDController } from './utils/pid';
 
 const ConfigInput: React.FC<{
   label: string, 
@@ -108,18 +107,16 @@ const App: React.FC = () => {
   const intakeCooldownRef = useRef(false);
   const partnerIntakeCooldownRef = useRef(false);
   
-  const r1Vel = useRef<Vector2>({ x: 0, y: 0 });
-  const r1RotVel = useRef<number>(0);
-  const r2Vel = useRef<Vector2>({ x: 0, y: 0 });
-  const r2RotVel = useRef<number>(0);
+  // Mecanum wheel states [FL, BL, FR, BR] normalised –1…1
+  const r1Wheels = useRef<number[]>([0, 0, 0, 0]);
+  const r2Wheels = useRef<number[]>([0, 0, 0, 0]);
 
-  const pids = useRef({
-    r1: { x: new PIDController(10, 0, 0.5), y: new PIDController(10, 0, 0.5), h: new PIDController(12, 0, 0.6) },
-    r2: { x: new PIDController(10, 0, 0.5), y: new PIDController(10, 0, 0.5), h: new PIDController(12, 0, 0.6) }
-  });
-
-  const MAX_SPEED = 76.5; 
-  const MAX_ROT_SPEED = 5.5;
+  // ── Mecanum physics constants ──
+  const MAX_FORWARD_SPEED = 76.5;                      // in/s (forward / backward)
+  const MAX_STRAFE_SPEED  = MAX_FORWARD_SPEED * 0.80;  // ~80 % — roller slip penalty
+  const MAX_ROT_SPEED     = 5.5;                       // rad/s
+  const MOTOR_RESPONSE    = 6.0;                       // wheel accel rate (1/s)
+  const COAST_FRICTION    = 4.5;                       // wheel decel when idle (1/s)
 
   const allianceThemeColor = alliance === 'red' ? 'text-red-500' : 'text-blue-500';
   const allianceBgColor = alliance === 'red' ? 'bg-red-600' : 'bg-blue-600';
@@ -134,6 +131,8 @@ const App: React.FC = () => {
     if (deg < 0) deg += 360;
     return deg;
   };
+
+  const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
 
   const getBasketCenter = (a: Alliance): Vector2 => {
     return a === 'red' ? { x: 144, y: 0 } : { x: 0, y: 0 };
@@ -152,10 +151,8 @@ const App: React.FC = () => {
 
   useEffect(() => {
     if (!isRunning) {
-      r1Vel.current = { x: 0, y: 0 }; r1RotVel.current = 0;
-      r2Vel.current = { x: 0, y: 0 }; r2RotVel.current = 0;
-      (Object.values(pids.current.r1) as PIDController[]).forEach(p => p.reset());
-      (Object.values(pids.current.r2) as PIDController[]).forEach(p => p.reset());
+      r1Wheels.current = [0, 0, 0, 0];
+      r2Wheels.current = [0, 0, 0, 0];
       setIsShootingMode(false);
     }
   }, [isRunning]);
@@ -243,79 +240,81 @@ const App: React.FC = () => {
 
         
 
-        const getPhysInput = (axes: number[], state: RobotState, vel: any, rot: any, p: any) => {
-          // Mecanum wheel physics - realistic speed modifiers
-          const fwd = -axes[1];
-          const strafe = axes[0];
-          const turn = axes[2];
-          
-          // Calculate movement vector magnitude
-          const driveVector = Math.sqrt(fwd * fwd + strafe * strafe);
-          
-          // Speed modifiers based on movement type (mecanum characteristics)
-          let speedMultiplier = 1.0;
-          
-          if (driveVector > 0.1) {
-            // Pure strafe (sideways) is slower on mecanum wheels (~70% efficiency)
-            const strafeRatio = Math.abs(strafe) / (driveVector + 0.001);
-            const forwardRatio = Math.abs(fwd) / (driveVector + 0.001);
-            
-            if (strafeRatio > 0.9) {
-              // Almost pure strafe
-              speedMultiplier = 0.72;
-            } else if (strafeRatio > 0.5) {
-              // Diagonal movement - mix of strafe and forward
-              speedMultiplier = 0.85;
-            } else {
-              // Mostly forward/backward - full speed
-              speedMultiplier = 1.0;
+        // ── Full mecanum kinematics (Tier B) ──
+        const getMecanumPhysics = (
+          axes: number[],
+          state: RobotState,
+          wheels: { current: number[] }
+        ) => {
+          // 1. Joystick → robot-intent
+          let inputY = -axes[1];   // forward  (stick up = +)
+          let inputX =  axes[0];   // strafe R (stick right = +)
+          let inputW =  axes[2];   // rotate CW
+
+          // 2. Field-centric: rotate stick vector into robot frame
+          if (driveModeRef.current === 'field') {
+            let h = state.heading;
+            if (allianceRef.current === 'red') h += Math.PI; // red faces opposite
+            const c = Math.cos(-h);
+            const s = Math.sin(-h);
+            const rx = inputX * c - inputY * s;
+            const ry = inputX * s + inputY * c;
+            inputX = rx;
+            inputY = ry;
+          }
+
+          // 3. Forward kinematics → target wheel powers  (X-pattern)
+          //    FL = vy + vx + ω    FR = vy − vx − ω
+          //    BL = vy − vx + ω    BR = vy + vx − ω
+          const tFL = inputY + inputX + inputW;
+          const tBL = inputY - inputX + inputW;
+          const tFR = inputY - inputX - inputW;
+          const tBR = inputY + inputX - inputW;
+
+          // 4. Normalize so no motor exceeds |1|
+          const mx = Math.max(1, Math.abs(tFL), Math.abs(tBL), Math.abs(tFR), Math.abs(tBR));
+          const nFL = tFL / mx, nBL = tBL / mx, nFR = tFR / mx, nBR = tBR / mx;
+
+          // 5. Motor response — wheels ramp toward target (acceleration limit)
+          const acc = MOTOR_RESPONSE * dt;
+          wheels.current[0] += clamp(nFL - wheels.current[0], -acc, acc);
+          wheels.current[1] += clamp(nBL - wheels.current[1], -acc, acc);
+          wheels.current[2] += clamp(nFR - wheels.current[2], -acc, acc);
+          wheels.current[3] += clamp(nBR - wheels.current[3], -acc, acc);
+
+          // 6. Coast friction — bleed off speed when sticks are centred
+          const stick = Math.abs(inputX) + Math.abs(inputY) + Math.abs(inputW);
+          if (stick < 0.05) {
+            const fr = COAST_FRICTION * dt;
+            for (let i = 0; i < 4; i++) {
+              if (Math.abs(wheels.current[i]) < fr) wheels.current[i] = 0;
+              else wheels.current[i] -= Math.sign(wheels.current[i]) * fr;
             }
           }
-          
-          // Turning while driving reduces speed (realistic motor load distribution)
-          if (driveVector > 0.1 && Math.abs(turn) > 0.1) {
-            const turnPenalty = Math.abs(turn) * 0.25; // Up to 25% speed reduction
-            speedMultiplier *= (1.0 - turnPenalty);
-          }
-          
-          // Pure rotation (no drive) uses different max speed
-          const effectiveMaxSpeed = driveVector < 0.05 ? MAX_SPEED : MAX_SPEED * speedMultiplier;
-          
-          const targetFwd = fwd * effectiveMaxSpeed;
-          const targetStr = strafe * effectiveMaxSpeed;
-          const targetRot = turn * MAX_ROT_SPEED;
 
-          p.x.setTarget(targetStr);
-          p.y.setTarget(targetFwd);
-          p.h.setTarget(targetRot);
+          // 7. Inverse kinematics → robot-frame velocity
+          const [fl, bl, fr, br] = wheels.current;
+          const vy_r = (fl + bl + fr + br) / 4;   // forward
+          const vx_r = (fl - bl - fr + br) / 4;   // strafe R
+          const om   = (fl + bl - fr - br) / 4;   // CCW
 
-          vel.current.x += p.x.update(vel.current.x, dt) * dt;
-          vel.current.y += p.y.update(vel.current.y, dt) * dt;
-          rot.current += p.h.update(rot.current, dt) * dt;
+          // 8. Scale to real units (strafe gets roller-slip penalty)
+          const vyReal = vy_r * MAX_FORWARD_SPEED;
+          const vxReal = vx_r * MAX_STRAFE_SPEED;
+          const omReal = om   * MAX_ROT_SPEED;
 
+          // 9. Robot-frame → world-frame
           const h = state.heading;
-          let world_dx = 0;
-          let world_dy = 0;
+          const world_dx = (vyReal * Math.cos(h) - vxReal * Math.sin(h)) * dt;
+          const world_dy = (vyReal * Math.sin(h) + vxReal * Math.cos(h)) * dt;
 
-          if (driveModeRef.current === 'robot') {
-            world_dx = (vel.current.y * Math.cos(h) - vel.current.x * Math.sin(h)) * dt;
-            world_dy = (vel.current.y * Math.sin(h) + vel.current.x * Math.cos(h)) * dt;
-          } else {
-            if (allianceRef.current === 'blue') {
-              world_dx = vel.current.y * dt;
-              world_dy = vel.current.x * dt;
-            } else {
-              world_dx = -vel.current.y * dt;
-              world_dy = -vel.current.x * dt;
-            }
-          }
-          return { world_dx, world_dy, nh: normalizeRadians(h + rot.current * dt) };
+          return { world_dx, world_dy, nh: normalizeRadians(h + omReal * dt) };
         };
 
         setRobot(currentRobot => {
           const axes = getAxes(0);
           const buttons = getButtons(0);
-          const { world_dx, world_dy, nh } = getPhysInput(axes, currentRobot, r1Vel, r1RotVel, pids.current.r1);
+          const { world_dx, world_dy, nh } = getMecanumPhysics(axes, currentRobot, r1Wheels);
           
           let nx = currentRobot.pos.x + world_dx;
           let ny = currentRobot.pos.y + world_dy;
@@ -451,7 +450,7 @@ const App: React.FC = () => {
           setPartner(currentPartner => {
             const axes = getAxes(1);
             const buttons = getButtons(1);
-            const { world_dx, world_dy, nh } = getPhysInput(axes, currentPartner, r2Vel, r2RotVel, pids.current.r2);
+            const { world_dx, world_dy, nh } = getMecanumPhysics(axes, currentPartner, r2Wheels);
             
             let nx = currentPartner.pos.x + world_dx;
             let ny = currentPartner.pos.y + world_dy;
