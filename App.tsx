@@ -102,7 +102,7 @@ const App: React.FC = () => {
   const [headingDrift, setHeadingDrift] = useState(0);
   const matchStartTime = useRef<number>(0);
 
-  const { getAxes, getButtons } = useGamepad();
+  const { getAxes, getButtons, connectedCount, activeKeys } = useGamepad();
   const lastUpdateRef = useRef<number>(performance.now());
   const shootCooldownRef = useRef(false);
   const partnerShootCooldownRef = useRef(false);
@@ -833,12 +833,15 @@ const App: React.FC = () => {
                 <div className="bg-black/60 backdrop-blur-md px-3 py-1.5 rounded-lg border border-white/5 flex flex-col gap-0.5">
                   <span className="text-[7px] font-bold text-neutral-500 uppercase tracking-tighter">System HUD</span>
                   <div className="flex gap-2 items-center">
-                    <span className="text-[9px] font-black text-white uppercase">{driveMode}</span>
+                        <span className="text-[9px] font-black text-white uppercase">{driveMode}</span>
                     <span className="w-1 h-1 rounded-full bg-neutral-600"></span>
                     <span className={`text-[9px] font-black uppercase ${isShootingMode ? 'text-red-400' : 'text-green-400'}`}>
                       {isShootingMode ? 'ARMED' : 'INTAKE'}
                     </span>
                   </div>
+                      <div className="text-[9px] font-mono text-neutral-400 uppercase mt-1">
+                        Input: {activeKeys && activeKeys.size > 0 ? 'Keyboard' : (connectedCount > 0 ? `Gamepad (${connectedCount})` : 'None')}
+                      </div>
                 </div>
               </div>
 
