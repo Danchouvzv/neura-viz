@@ -56,24 +56,24 @@ export const useGamepad = () => {
         }
       }
 
-      // Keyboard Fallback for Player 1
-      if (foundGamepads === 0 || (foundGamepads > 0 && Math.abs(newAxes[0][0]) < 0.01 && Math.abs(newAxes[0][1]) < 0.01)) {
+      // Keyboard input: if any keys are pressed, prefer keyboard controls
+      if (internalKeys.current.size > 0) {
         if (internalKeys.current.has('w')) newAxes[0][1] = -1;
         if (internalKeys.current.has('s')) newAxes[0][1] = 1;
         if (internalKeys.current.has('a')) newAxes[0][0] = -1;
         if (internalKeys.current.has('d')) newAxes[0][0] = 1;
         if (internalKeys.current.has('q')) newAxes[0][2] = -1;
         if (internalKeys.current.has('e')) newAxes[0][2] = 1;
-        
+
         // R2 (Button 7) fallback: space / r
         if (internalKeys.current.has('r') || internalKeys.current.has(' ')) newButtons[0][7] = true;
-        
+
         // L1 (Button 4) fallback: '1' or 'l'
         if (internalKeys.current.has('1') || internalKeys.current.has('l')) newButtons[0][4] = true;
-        
+
         // L2 (Button 6) fallback: 'z'
         if (internalKeys.current.has('z')) newButtons[0][6] = true;
-        
+
         // X button (Button 0 or 2) fallback: 'x' or '3'
         if (internalKeys.current.has('x') || internalKeys.current.has('3')) {
            newButtons[0][0] = true;
