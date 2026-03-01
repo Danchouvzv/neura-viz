@@ -214,7 +214,13 @@ export function stepMecanumPhysics(
       scale(rPerp, fPerp)
     );
 
-    totalForceRobot = add(totalForceRobot, fWheel);
+    // --- Driving force from motor torque (converted to linear force at contact) ---
+    // f_drive = torque / wheel_radius (N), applied along wheel forward direction (robot-frame)
+    const driveForceN = tau / WHEEL_RADIUS_M; // N
+    const driveForceRobot: Vec2 = scale(WHEEL_FORWARD[i], driveForceN);
+
+    // Add drive force but it will be naturally limited by anisotropic friction when slip occurs
+    totalForceRobot = add(totalForceRobot, add(fWheel, driveForceRobot));
 
     // Torque about robot centre from this wheel (in N·m)
     // τ = r × F  (2D: rx*Fy - ry*Fx) — positions in metres
