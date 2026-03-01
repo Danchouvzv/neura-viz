@@ -61,6 +61,9 @@ const MU_PERP     = 0.85;     // perpendicular to roller — high grip
 const MU_FIELD    = 0.55;     // field tile kinetic friction for sliding
 const COEFF_RESTITUTION = 0.25; // wall bounce
 
+// Drive tuning: scale motor torque -> contact force. Increase to make robot accelerate/faster.
+const DRIVE_FORCE_SCALE = 3.5;
+
 // Each wheel's position relative to robot centre (inches, robot-frame: +x=right, +y=forward)
 const WHEEL_POSITIONS: Vec2[] = [
   { x: -TRACK_HALF_W, y:  WHEEL_BASE_HALF_L }, // FL
@@ -216,7 +219,7 @@ export function stepMecanumPhysics(
 
     // --- Driving force from motor torque (converted to linear force at contact) ---
     // f_drive = torque / wheel_radius (N), applied along wheel forward direction (robot-frame)
-    const driveForceN = tau / WHEEL_RADIUS_M; // N
+    const driveForceN = (tau * DRIVE_FORCE_SCALE) / WHEEL_RADIUS_M; // N (scaled)
     const driveForceRobot: Vec2 = scale(WHEEL_FORWARD[i], driveForceN);
 
     // Add drive force but it will be naturally limited by anisotropic friction when slip occurs
