@@ -64,6 +64,9 @@ const COEFF_RESTITUTION = 0.25; // wall bounce
 // Drive tuning: scale motor torque -> contact force. Increase to make robot accelerate/faster.
 const DRIVE_FORCE_SCALE = 3.5;
 
+// Strafing tuning: penalize lateral forces so strafing isn't unrealistically fast
+const STRAFE_PENALTY = 0.45; // 0..1 where 1 = no penalty, lower = less lateral force
+
 // Each wheel's position relative to robot centre (inches, robot-frame: +x=right, +y=forward)
 const WHEEL_POSITIONS: Vec2[] = [
   { x: -TRACK_HALF_W, y:  WHEEL_BASE_HALF_L }, // FL
@@ -222,8 +225,11 @@ export function stepMecanumPhysics(
     const driveForceN = (tau * DRIVE_FORCE_SCALE) / WHEEL_RADIUS_M; // N (scaled)
     const driveForceRobot: Vec2 = scale(WHEEL_FORWARD[i], driveForceN);
 
-    // Add drive force but it will be naturally limited by anisotropic friction when slip occurs
-    totalForceRobot = add(totalForceRobot, add(fWheel, driveForceRobot));
+    // Combine wheel friction and drive force
+    const combined = add(fWheel, driveForceRobot);
+    // Penalize lateral (robot-frame X) force to reduce excessive strafing
+    const combinedPenalized: Vec2 = { x: combined.x * STRAFE_PENALTY, y: combined.y };
+    totalForceRobot = add(totalForceRobot, combinedPenalized);
 
     // Torque about robot centre from this wheel (in N·m)
     // τ = r × F  (2D: rx*Fy - ry*Fx) — positions in metres
