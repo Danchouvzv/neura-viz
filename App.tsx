@@ -299,15 +299,19 @@ const App: React.FC = () => {
             inputW += clamp(correction, -0.3, 0.3);
           }
 
-          // Inverse kinematics → motor power commands (X-pattern mecanum)
-          const tFL = inputY + inputX + inputW;
-          const tBL = inputY - inputX + inputW;
-          const tFR = inputY - inputX - inputW;
-          const tBR = inputY + inputX - inputW;
-
-          // Normalize so no motor exceeds |1|
-          const mx = Math.max(1, Math.abs(tFL), Math.abs(tBL), Math.abs(tFR), Math.abs(tBR));
-          return [tFL / mx, tBL / mx, tFR / mx, tBR / mx];
+          // Apply FTC-recommended strafing correction and normalization
+          // Counteract imperfect strafing: scale X slightly
+          inputX = inputX * 1.1;
+          const y = inputY;
+          const x = inputX;
+          const rx = inputW;
+          // Denominator as in FTC docs ensures ratio preserved
+          const denominator = Math.max(Math.abs(y) + Math.abs(x) + Math.abs(rx), 1);
+          const frontLeftPower  = (y + x + rx) / denominator;
+          const backLeftPower   = (y - x + rx) / denominator;
+          const frontRightPower = (y - x - rx) / denominator;
+          const backRightPower  = (y + x - rx) / denominator;
+          return [frontLeftPower, backLeftPower, frontRightPower, backRightPower];
         };
 
         setRobot(currentRobot => {
